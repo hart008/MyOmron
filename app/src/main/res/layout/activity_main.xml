@@ -3,8 +3,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:gravity="center"
-    android:padding="32dp">
+    android:padding="16dp">
 
     <TextView
         android:layout_width="wrap_content"
@@ -18,7 +17,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="Scanning..."
-        android:layout_marginTop="32dp"/>
+        android:layout_marginTop="16dp"/>
 
     <TextView
         android:id="@+id/tvPressure"
@@ -26,7 +25,7 @@
         android:layout_height="wrap_content"
         android:text="---/---"
         android:textSize="64sp"
-        android:layout_marginTop="48dp"
+        android:layout_marginTop="32dp"
         android:textStyle="bold"/>
 
     <TextView
@@ -35,13 +34,41 @@
         android:layout_height="wrap_content"
         android:text="Pulse: ---"
         android:textSize="24sp"
-        android:layout_marginTop="16dp"/>
+        android:layout_marginTop="8dp"/>
 
-    <Button
-        android:id="@+id/btnReconnect"
-        android:layout_width="wrap_content"
+    <LinearLayout
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Reconnect"
-        android:layout_marginTop="32dp"/>
+        android:orientation="horizontal"
+        android:layout_marginTop="24dp">
+
+        <Button
+            android:id="@+id/btnClearHistory"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Clear History"
+            android:layout_marginEnd="8dp"/>
+
+        <Button
+            android:id="@+id/btnReconnect"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Reconnect"/>
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/tvHistory"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:text="No history yet"
+        android:layout_marginTop="16dp"
+        android:background="#F5F5F5"
+        android:padding="12dp"
+        android:fontFamily="monospace"
+        android:textColor="#000000"
+        android:scrollbars="vertical"/>
 
 </LinearLayout>

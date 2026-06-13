@@ -12,11 +12,10 @@ import android.widget.Button
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
-import java.util.UUID
+import java.util.*
 import kotlin.math.pow
 import android.annotation.SuppressLint
-import android.os.Handler
-import android.os.Looper
+import java.text.SimpleDateFormat
 
 class MainActivity : ComponentActivity() {
 
@@ -26,6 +25,10 @@ class MainActivity : ComponentActivity() {
         private val BLOOD_PRESSURE_SERVICE = UUID.fromString("00001810-0000-1000-8000-00805f9b34fb")
         private val BP_MEASUREMENT_CHAR = UUID.fromString("00002a35-0000-1000-8000-00805f9b34fb")
         private val CLIENT_CONFIG = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+        // UCP для информации (не используем активно)
+        private val USER_DATA_SERVICE = UUID.fromString("0000181c-0000-1000-8000-00805f9b34fb")
+        private val USER_CONTROL_POINT = UUID.fromString("00002a9f-0000-1000-8000-00805f9b34fb")
     }
 
     private lateinit var bluetoothAdapter: BluetoothAdapter
@@ -33,15 +36,18 @@ class MainActivity : ComponentActivity() {
     private var gatt: BluetoothGatt? = null
     private var isConnecting = false
 
-    private var measurementReceived = false
+    private var bpMeasurementChar: BluetoothGattCharacteristic? = null
+
+    // Для истории
+    private val historyMeasurements = mutableListOf<String>()
 
     // UI Elements
     private lateinit var tvStatus: TextView
     private lateinit var tvPressure: TextView
     private lateinit var tvPulse: TextView
+    private lateinit var tvHistory: TextView
     private lateinit var btnReconnect: Button
-
-    // ===== PERMISSIONS =====
+    private lateinit var btnClearHistory: Button
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -58,29 +64,32 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Инициализация UI
         tvStatus = findViewById(R.id.tvStatus)
         tvPressure = findViewById(R.id.tvPressure)
         tvPulse = findViewById(R.id.tvPulse)
+        tvHistory = findViewById(R.id.tvHistory)
         btnReconnect = findViewById(R.id.btnReconnect)
+        btnClearHistory = findViewById(R.id.btnClearHistory)
 
-        btnReconnect.setOnClickListener {
-            reconnect()
+        btnReconnect.setOnClickListener { reconnect() }
+        btnClearHistory.setOnClickListener {
+            historyMeasurements.clear()
+            updateHistoryDisplay()
+            tvStatus.text = "History cleared"
         }
 
         if (hasPermissions()) {
             initBluetooth()
         } else {
-            permissionLauncher.launch(
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    arrayOf(
-                        Manifest.permission.BLUETOOTH_SCAN,
-                        Manifest.permission.BLUETOOTH_CONNECT
-                    )
-                } else {
-                    arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-                }
-            )
+            val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                arrayOf(
+                    Manifest.permission.BLUETOOTH_SCAN,
+                    Manifest.permission.BLUETOOTH_CONNECT
+                )
+            } else {
+                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+            permissionLauncher.launch(permissions)
         }
     }
 
@@ -94,7 +103,7 @@ class MainActivity : ComponentActivity() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun hasConnectPermission(): Boolean {
+    private fun isConnectPermissionGranted(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
         } else {
@@ -102,7 +111,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // ===== BLE INIT =====
+    @SuppressLint("MissingPermission")
+    private fun isScanPermissionGranted(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+        } else {
+            checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        }
+    }
 
     private fun initBluetooth() {
         val manager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -110,7 +126,6 @@ class MainActivity : ComponentActivity() {
 
         if (!bluetoothAdapter.isEnabled) {
             tvStatus.text = "Bluetooth is OFF"
-            Log.e(TAG, "Bluetooth is OFF")
             return
         }
 
@@ -118,22 +133,15 @@ class MainActivity : ComponentActivity() {
         startScan()
     }
 
-    // ===== SCAN =====
-
     @SuppressLint("MissingPermission")
     private fun startScan() {
-        tvStatus.text = "Scanning..."
-        Log.d(TAG, "Scanning...")
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val granted = checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
-            if (!granted) {
-                Log.e(TAG, "No SCAN permission")
-                tvStatus.text = "No scan permission"
-                return
-            }
+        if (!isScanPermissionGranted()) {
+            tvStatus.text = "No scan permission"
+            return
         }
 
+        tvStatus.text = "Scanning..."
+        Log.d(TAG, "Scanning...")
         scanner.startScan(scanCallback)
     }
 
@@ -143,21 +151,17 @@ class MainActivity : ComponentActivity() {
             val device = result.device
             Log.d(TAG, "Found: ${device.name} ${device.address}")
 
-            val isTarget = device.name?.contains("OMRON", true) == true ||
-                    device.name?.contains("BLESmart", true) == true ||
+            val isTarget = device.name?.contains("BLESmart", true) == true ||
+                    device.name?.contains("OMRON", true) == true ||
                     device.name?.contains("HEM", true) == true
 
             if (!isTarget) return
 
-            if (isConnecting || gatt != null) {
-                Log.d(TAG, "Skip duplicate connection attempt")
-                return
-            }
-
-            if (!hasConnectPermission()) return
+            if (isConnecting || gatt != null) return
+            if (!isConnectPermissionGranted()) return
 
             isConnecting = true
-            tvStatus.text = "Connecting..."
+            runOnUiThread { tvStatus.text = "Connecting..." }
 
             try {
                 scanner.stopScan(this)
@@ -167,7 +171,6 @@ class MainActivity : ComponentActivity() {
                     gattCallback,
                     BluetoothDevice.TRANSPORT_LE
                 )
-                Log.d(TAG, "connectGatt started")
             } catch (e: SecurityException) {
                 isConnecting = false
                 Log.e(TAG, "connectGatt failed", e)
@@ -179,8 +182,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // ===== GATT CALLBACK =====
-
     @SuppressLint("MissingPermission")
     private val gattCallback = object : BluetoothGattCallback() {
 
@@ -191,67 +192,59 @@ class MainActivity : ComponentActivity() {
                     isConnecting = false
                     gatt = g
                     runOnUiThread { tvStatus.text = "Connected, discovering services..." }
-                    if (hasConnectPermission()) {
+                    if (isConnectPermissionGranted()) {
                         g.discoverServices()
                     }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-
                     Log.d(TAG, "❌ Disconnected")
-                    try {
-                        gatt?.close()
-                    } catch (_: SecurityException) {
-                    }
-                    gatt = null
                     isConnecting = false
-                    if (!measurementReceived) {
-                        Handler(Looper.getMainLooper()).postDelayed({
-                            startScan()
-                        }, 1000)
+                    runOnUiThread { tvStatus.text = "Disconnected" }
+                    closeGattSafe(g)
+                    if (gatt === g) {
+                        gatt = null
+                        bpMeasurementChar = null
                     }
                 }
             }
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-            for (service in g.services) {
-                Log.d(TAG, "SERVICE = ${service.uuid}")
-                for (characteristic in service.characteristics) {
-                    Log.d(
-                        TAG,
-                        "CHAR = ${characteristic.uuid} PROPS=${characteristic.properties}"
-                    )
-                }
-            }
-            for (service in g.services) {
-
-                for (ch in service.characteristics) {
-
-                    if (ch.uuid.toString()
-                            .equals(
-                                "00002a52-0000-1000-8000-00805f9b34fb",
-                                true
-                            )
-                    ) {
-
-                        Log.d(TAG, "=== RACP FOUND ===")
-                        Log.d(TAG, "UUID = ${ch.uuid}")
-                        Log.d(TAG, "PROPS = ${ch.properties}")
-
-                        for (d in ch.descriptors) {
-                            Log.d(TAG, "DESC = ${d.uuid}")
-                        }
-                    }
-                }
-            }
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.e(TAG, "Service discovery failed: $status")
                 return
             }
 
-            Log.d(TAG, "Services discovered")
-            runOnUiThread { tvStatus.text = "Services discovered, setting MTU..." }
+            Log.d(TAG, "✅ Services discovered")
 
+            // ===== Blood Pressure Service (1810) =====
+            val bpService = g.getService(BLOOD_PRESSURE_SERVICE)
+            if (bpService != null) {
+                Log.d(TAG, "=== Blood Pressure Service (1810) ===")
+
+                for (char in bpService.characteristics) {
+                    Log.d(TAG, "  Char: ${char.uuid} | props: ${char.properties}")
+                }
+
+                bpMeasurementChar = bpService.getCharacteristic(BP_MEASUREMENT_CHAR)
+                if (bpMeasurementChar != null) {
+                    Log.d(TAG, "✅ BP Measurement CHAR found")
+                    enableBPIndication(g)
+                }
+            } else {
+                Log.e(TAG, "❌ Blood Pressure Service (1810) not found!")
+            }
+
+            // UCP включаем для информации, но не используем активно
+            val userDataService = g.getService(USER_DATA_SERVICE)
+            if (userDataService != null) {
+                val ucp = userDataService.getCharacteristic(USER_CONTROL_POINT)
+                if (ucp != null) {
+                    Log.d(TAG, "✅ User Control Point FOUND (for info only)")
+                }
+            }
+
+            runOnUiThread { tvStatus.text = "Waiting for data from device..." }
             try {
                 g.requestMtu(160)
             } catch (e: Exception) {
@@ -264,14 +257,8 @@ class MainActivity : ComponentActivity() {
                 Log.e(TAG, "MTU failed: $status")
                 return
             }
-
             Log.d(TAG, "MTU: $mtu")
-
-            enableIndication(g)
-
-            Handler(Looper.getMainLooper()).postDelayed({
-                enableRacp(g)
-            }, 500)
+            runOnUiThread { tvStatus.text = "Ready - device will send data automatically" }
         }
 
         override fun onDescriptorWrite(
@@ -279,202 +266,63 @@ class MainActivity : ComponentActivity() {
             descriptor: BluetoothGattDescriptor,
             status: Int
         ) {
-
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                Log.e(TAG, "Descriptor write failed: $status")
-                return
-            }
-
             val charUuid = descriptor.characteristic.uuid
+            Log.d(TAG, "Descriptor written for $charUuid status=$status")
 
-            Log.d(TAG, "Descriptor written for $charUuid")
-
-            if (charUuid == BP_MEASUREMENT_CHAR) {
-
-                Log.d(TAG, "✅ BP indication enabled")
-
-                runOnUiThread {
-                    tvStatus.text = "Ready! Press START on your Omron device"
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                when (charUuid) {
+                    BP_MEASUREMENT_CHAR -> {
+                        Log.d(TAG, "✅ BP indications enabled")
+                        runOnUiThread { tvStatus.text = "BP indications enabled, waiting for data..." }
+                    }
                 }
-
-            } else if (
-                charUuid == UUID.fromString("00002a52-0000-1000-8000-00805f9b34fb")
-            ) {
-
-                Log.d(TAG, "✅ RACP indication enabled")
-
-                Handler(Looper.getMainLooper()).postDelayed({
-                    requestHistory(g)
-                }, 500)
+            } else {
+                Log.e(TAG, "❌ Descriptor write failed: $status")
             }
-        }
-        override fun onCharacteristicWrite(
-            g: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
-            Log.d(
-                TAG,
-                "Characteristic write ${characteristic.uuid} status=$status"
-            )
         }
 
         override fun onCharacteristicChanged(
             g: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            Log.d(
-                TAG,
-                "NOTIFY UUID = ${characteristic.uuid}"
-            )
             val data = characteristic.value
-            Log.d(TAG, "RAW: ${data.joinToString { "%02x".format(it) }}")
+            Log.d(TAG, "📩 NOTIFY/INDICATE from ${characteristic.uuid}")
+            Log.d(TAG, "   Data: ${data.joinToString { "%02x".format(it) }}")
 
-            val result = parseBP(data)
+            when (characteristic.uuid) {
+                BP_MEASUREMENT_CHAR -> {
+                    val result = parseBP(data)
 
-            runOnUiThread {
-                tvPressure.text = "${result.systolic.toInt()}/${result.diastolic.toInt()}"
-                tvPulse.text = "Pulse: ${result.pulse.toInt()} bpm"
-                tvStatus.text = "Measurement received!"
-            }
+                    // ВСЕ ПРИХОДЯЩИЕ ИЗМЕРЕНИЯ ДОБАВЛЯЕМ В ИСТОРИЮ
+                    val timeStr = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                    val historyLine = "${timeStr} - ${result.systolic.toInt()}/${result.diastolic.toInt()} @ ${result.pulse.toInt()} bpm"
+                    historyMeasurements.add(0, historyLine)
+                    updateHistoryDisplay()
 
-            // Сброс статуса через 3 секунды
-            android.os.Handler(mainLooper).postDelayed({
-                runOnUiThread {
-                    if (tvStatus.text == "Measurement received!") {
-                        tvStatus.text = "Ready for next measurement"
+                    runOnUiThread {
+                        tvPressure.text = "${result.systolic.toInt()}/${result.diastolic.toInt()}"
+                        tvPulse.text = "Pulse: ${result.pulse.toInt()} bpm"
+                        tvStatus.text = "📊 ${historyMeasurements.size} measurements received"
                     }
+
+                    Log.d(TAG, "📊 BP: ${result.systolic.toInt()}/${result.diastolic.toInt()} pulse=${result.pulse.toInt()}")
                 }
-            }, 3000)
+            }
         }
     }
 
-    // ===== ENABLE INDICATION =====
-
     @SuppressLint("MissingPermission")
-    private fun enableIndication(g: BluetoothGatt) {
-        if (!hasConnectPermission()) return
+    private fun enableBPIndication(g: BluetoothGatt) {
+        if (!isConnectPermissionGranted()) return
 
-        try {
-            val service = g.getService(BLOOD_PRESSURE_SERVICE)
-            if (service == null) {
-                Log.e(TAG, "No BP service")
-                return
-            }
-
-            val char = service.getCharacteristic(BP_MEASUREMENT_CHAR)
-            if (char == null) {
-                Log.e(TAG, "No BP char")
-                return
-            }
-
+        bpMeasurementChar?.let { char ->
             g.setCharacteristicNotification(char, true)
-
             val descriptor = char.getDescriptor(CLIENT_CONFIG)
-            if (descriptor == null) {
-                Log.e(TAG, "No descriptor")
-                return
+            descriptor?.let {
+                it.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                g.writeDescriptor(it)
+                Log.d(TAG, "Enabling BP indications")
             }
-
-            descriptor.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-            g.writeDescriptor(descriptor)
-            Log.d(TAG, "BP indication request sent")
-
-        } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException in enableIndication()", e)
-        }
-    }
-
-    // ===== CLOSE GATT SAFE =====
-
-    @SuppressLint("MissingPermission")
-    private fun closeGattSafe(g: BluetoothGatt?) {
-        if (g == null) return
-
-        try {
-            if (hasConnectPermission()) {
-                g.close()
-            }
-        } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException while closing GATT", e)
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun enableRacp(gatt: BluetoothGatt) {
-
-        try {
-            val service = gatt.getService(
-                UUID.fromString("5df5e817-a945-4f81-89c0-3d4e9759c07c")
-            ) ?: return
-
-            val racp = service.getCharacteristic(
-                UUID.fromString("00002a52-0000-1000-8000-00805f9b34fb")
-            ) ?: return
-
-            gatt.setCharacteristicNotification(racp, true)
-
-            val cccd = racp.getDescriptor(
-                UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-            ) ?: return
-
-            cccd.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeDescriptor(
-                    cccd,
-                    BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                gatt.writeDescriptor(cccd)
-            }
-
-            Log.d(TAG, "RACP indication enabled")
-        } catch (e: SecurityException) {
-            Log.e(TAG, "enableRacp", e)
-        }
-    }
-
-    private fun requestHistory(gatt: BluetoothGatt) {
-        if (!hasConnectPermission()) {
-            Log.e(TAG, "No BLUETOOTH_CONNECT permission")
-            return
-        }
-        try {
-            val service = gatt.getService(
-                UUID.fromString("5df5e817-a945-4f81-89c0-3d4e9759c07c")
-            ) ?: return
-
-            val racp = service.getCharacteristic(
-                UUID.fromString("00002a52-0000-1000-8000-00805f9b34fb")
-            ) ?: return
-
-            val cmd = byteArrayOf(
-                0x01,
-                0x01
-            )
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-
-                gatt.writeCharacteristic(
-                    racp,
-                    cmd,
-                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                )
-
-            } else {
-
-                @Suppress("DEPRECATION")
-                racp.value = cmd
-
-                @Suppress("DEPRECATION")
-                gatt.writeCharacteristic(racp)
-            }
-
-            Log.d(TAG, "RACP history request sent")
-        } catch (e: SecurityException) {
-            Log.e(TAG, "enableRacp", e)
         }
     }
 
@@ -488,26 +336,16 @@ class MainActivity : ComponentActivity() {
     )
 
     private fun parseBP(data: ByteArray): BPResult {
-
-        measurementReceived = true
-
         if (data.size < 7) {
             Log.e(TAG, "Data too short: ${data.size} bytes")
             return BPResult(0f, 0f, 0f, 0f)
         }
 
         var offset = 1
-
-        // Систола (2 байта, IEEE-11073 sfloat)
         val systolic = readSFloat(data, offset); offset += 2
-
-        // Диастола (2 байта, IEEE-11073 sfloat)
         val diastolic = readSFloat(data, offset); offset += 2
-
-        // Среднее давление (2 байта, IEEE-11073 sfloat)
         val meanArterial = readSFloat(data, offset); offset += 2
 
-        // Пульс - на позиции 14 (один байт)
         var pulse = 0f
         if (data.size > 14) {
             val pulseValue = data[14].toInt() and 0xFF
@@ -516,38 +354,44 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        Log.d(TAG, "===== BLOOD PRESSURE =====")
-        Log.d(TAG, "Systolic: $systolic mmHg")
-        Log.d(TAG, "Diastolic: $diastolic mmHg")
-        Log.d(TAG, "Mean Arterial: $meanArterial mmHg")
-        Log.d(TAG, "Pulse: $pulse bpm")
-        Log.d(TAG, "=========================")
-
         return BPResult(systolic, diastolic, meanArterial, pulse)
     }
 
     private fun readSFloat(data: ByteArray, offset: Int): Float {
         val b0 = data[offset].toInt() and 0xFF
         val b1 = data[offset + 1].toInt() and 0xFF
-
         val raw = (b1 shl 8) or b0
-
         val mantissa = raw and 0x0FFF
         val exponent = raw shr 12
-
         val m = if (mantissa >= 0x0800) mantissa - 0x1000 else mantissa
         val e = if (exponent >= 0x08) exponent - 0x10 else exponent
-
         return (m * 10.0.pow(e)).toFloat()
     }
 
-    // ===== RECONNECT =====
+    private fun updateHistoryDisplay() {
+        val displayText = historyMeasurements.take(15).joinToString("\n")
+        runOnUiThread {
+            tvHistory.text = if (displayText.isEmpty()) "No history yet\n\nMeasurements will appear here automatically when device sends them" else displayText
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun closeGattSafe(g: BluetoothGatt?) {
+        if (g == null) return
+        try {
+            if (isConnectPermissionGranted()) {
+                g.close()
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException while closing GATT", e)
+        }
+    }
 
     private fun reconnect() {
         runOnUiThread { tvStatus.text = "Reconnecting..." }
-
         closeGattSafe(gatt)
         gatt = null
+        bpMeasurementChar = null
         isConnecting = false
         initBluetooth()
     }
